@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tokyo Tower 3D World</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0b1020; overflow: hidden; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+  #hud { position: fixed; left: 16px; top: 16px; color: #fff; background: rgba(10, 14, 30, .55); backdrop-filter: blur(6px); border: 1px solid rgba(255,255,255,.12); border-radius: 12px; padding: 12px 14px; max-width: min(320px, calc(100vw - 32px)); font-size: 13px; line-height: 1.5; }
+  #hud h1 { font-size: 15px; margin: 0 0 6px; letter-spacing: .02em; }
+  #hud p { margin: 0; opacity: .85; }
+  #hud .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  #hud button { cursor: pointer; border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.08); color: #fff; border-radius: 8px; padding: 6px 10px; font-size: 12px; }
+  #hud button:hover { background: rgba(255,255,255,.18); }
+  #hud button.active { background: #e8552e; border-color: #e8552e; }
+  #fps { position: fixed; right: 12px; bottom: 10px; color: rgba(255,255,255,.5); font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="hud">
+  <h1>🗼 東京タワー 3D ワールド</h1>
+  <p>ドラッグで回転 / ホイールでズーム / 右ドラッグで移動。<br>WASD + マウスで歩き回れます（Walk モード）。</p>
+  <div class="row">
+    <button id="btnOrbit" class="active">Orbit</button>
+    <button id="btnWalk">Walk</button>
+    <button id="btnNight">🌙 Night</button>
+    <button id="btnAuto">⟳ Auto</button>
+  </div>
+</div>
+<div id="fps"></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "./vendor/three/three.module.js",
+  "three/addons/": "./vendor/three/addons/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+// ---------- Renderer / scene ----------
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+app.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.5, 6000);
+camera.position.set(420, 190, 420);
+
+// ---------- Sky (gradient dome) ----------
+const skyUniforms = {
+  topColor:    { value: new THREE.Color(0x2a6fd6) },
+  bottomColor: { value: new THREE.Color(0xdcecff) },
+  offset:      { value: 60 },
+  exponent:    { value: 0.7 },
+};
+const sky = new THREE.Mesh(
+  new THREE.SphereGeometry(3000, 32, 16),
+  new THREE.ShaderMaterial({
+    uniforms: skyUniforms, side: THREE.BackSide, depthWrite: false,
+    vertexShader: `varying vec3 vW; void main(){ vec4 w = modelMatrix*vec4(position,1.); vW = w.xyz; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.); }`,
+    fragmentShader: `uniform vec3 topColor,bottomColor; uniform float offset,exponent; varying vec3 vW;
+      void main(){ float h = normalize(vW+vec3(0,offset,0)).y; gl_FragColor = vec4(mix(bottomColor, topColor, max(pow(max(h,0.),exponent),0.)),1.); }`
+  })
+);
+scene.add(sky);
+scene.fog = new THREE.Fog(0xdcecff, 900, 2800);
+
+// ---------- Lights ----------
+const hemi = new THREE.HemisphereLight(0xbfd8ff, 0x6b5a45, 0.7);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xfff2e0, 2.2);
+sun.position.set(-500, 700, 300);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near = 100; sun.shadow.camera.far = 2000;
+sun.shadow.camera.left = -400; sun.shadow.camera.right = 400;
+sun.shadow.camera.top = 400; sun.shadow.camera.bottom = -400;
+sun.shadow.bias = -0.0005;
+scene.add(sun);
+
+// ---------- Ground ----------
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(5000, 5000),
+  new THREE.MeshStandardMaterial({ color: 0x8a8f8a, roughness: 1 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Park / plaza under the tower (Shiba Park feel)
+const plaza = new THREE.Mesh(new THREE.CircleGeometry(150, 64), new THREE.MeshStandardMaterial({ color: 0x6e8f5a, roughness: 1 }));
+plaza.rotation.x = -Math.PI / 2; plaza.position.y = 0.05; plaza.receiveShadow = true;
+scene.add(plaza);
+
+// Roads (simple cross grid)
+const roadMat = new THREE.MeshStandardMaterial({ color: 0x3a3d42, roughness: 0.95 });
+for (let i = -4; i <= 4; i++) {
+  const r1 = new THREE.Mesh(new THREE.PlaneGeometry(5000, 22), roadMat);
+  r1.rotation.x = -Math.PI / 2; r1.position.set(0, 0.1, i * 420 + 210); scene.add(r1);
+  const r2 = new THREE.Mesh(new THREE.PlaneGeometry(22, 5000), roadMat);
+  r2.rotation.x = -Math.PI / 2; r2.position.set(i * 420 + 210, 0.1, 0); scene.add(r2);
+}
+
+// ---------- Materials ----------
+const ORANGE = 0xe8552e, WHITE = 0xf2f2ee;
+const matOrange = new THREE.MeshStandardMaterial({ color: ORANGE, roughness: 0.6, metalness: 0.35 });
+const matWhite  = new THREE.MeshStandardMaterial({ color: WHITE,  roughness: 0.6, metalness: 0.35 });
+const matDeck   = new THREE.MeshStandardMaterial({ color: 0xf4f4f0, roughness: 0.5, metalness: 0.2 });
+const matGlass  = new THREE.MeshPhysicalMaterial({ color: 0x9fd0ff, roughness: 0.15, metalness: 0.1, transmission: 0.35, transparent: true, opacity: 0.85 });
+const matAnt    = new THREE.MeshStandardMaterial({ color: 0xd9d9d9, roughness: 0.4, metalness: 0.7 });
+
+// ---------- Tokyo Tower (procedural lattice) ----------
+// Real dimensions: 333 m tall, main deck ~150 m, top deck ~250 m, base ~ 80 m square.
+const tower = new THREE.Group();
+scene.add(tower);
+
+// Half-width of the tower footprint at height h (metres). Flared base, straight upper shaft.
+function halfWidth(h) {
+  const base = 40, top = 5.5, H = 250;
+  const t = Math.min(h / H, 1);
+  // Hyperbolic-ish taper: fast narrowing near the bottom
+  return top + (base - top) * Math.pow(1 - t, 1.9) + (h > H ? 0 : 0);
+}
+// Colour band: real tower alternates orange & white in 7 horizontal bands.
+function bandMat(h) {
+  const bands = [0, 42, 85, 128, 165, 205, 250, 260];
+  let i = 0; while (i < bands.length - 1 && h >= bands[i + 1]) i++;
+  return i % 2 === 0 ? matOrange : matWhite;
+}
+
+const beamGeoCache = new Map();
+function beam(a, b, radius, mat) {
+  const dir = new THREE.Vector3().subVectors(b, a);
+  const len = dir.length();
+  const key = radius.toFixed(2);
+  if (!beamGeoCache.has(key)) beamGeoCache.set(key, new THREE.CylinderGeometry(radius, radius, 1, 6, 1));
+  const m = new THREE.Mesh(beamGeoCache.get(key), mat);
+  m.scale.set(1, len, 1);
+  m.position.copy(a).addScaledVector(dir, 0.5);
+  m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+  m.castShadow = true;
+  return m;
+}
+
+// Build legs and bracing
+const corners = [[1, 1], [1, -1], [-1, -1], [-1, 1]];
+const segHeights = [];
+for (let h = 0; h < 250; h += (h < 60 ? 15 : h < 150 ? 11 : 9)) segHeights.push(h);
+segHeights.push(250);
+
+function cornerPos(ci, h) {
+  const w = halfWidth(h);
+  return new THREE.Vector3(corners[ci][0] * w, h, corners[ci][1] * w);
+}
+
+for (let s = 0; s < segHeights.length - 1; s++) {
+  const h0 = segHeights[s], h1 = segHeights[s + 1];
+  const mat = bandMat((h0 + h1) / 2);
+  const legR = 1.6 - 1.1 * Math.min(h0 / 250, 1);
+  const braceR = legR * 0.45;
+  for (let c = 0; c < 4; c++) {
+    const a0 = cornerPos(c, h0), a1 = cornerPos(c, h1);
+    const b0 = cornerPos((c + 1) % 4, h0), b1 = cornerPos((c + 1) % 4, h1);
+    tower.add(beam(a0, a1, legR, mat));                 // main leg
+    tower.add(beam(a1, b1, braceR, mat));               // horizontal ring at top of segment
+    tower.add(beam(a0, b1, braceR * 0.85, mat));        // X bracing
+    tower.add(beam(b0, a1, braceR * 0.85, mat));
+  }
+}
+
+// Big arched base "legs" (the four splayed feet) – a thicker curved leg per corner
+for (let c = 0; c < 4; c++) {
+  const pts = [];
+  for (let h = 0; h <= 90; h += 6) pts.push(cornerPos(c, h));
+  const curve = new THREE.CatmullRomCurve3(pts);
+  const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 24, 2.6, 8, false), matOrange);
+  tube.castShadow = true;
+  tower.add(tube);
+}
+
+// FootTown building under the tower (the low building at the base)
+const foot = new THREE.Mesh(new THREE.BoxGeometry(70, 22, 70), new THREE.MeshStandardMaterial({ color: 0xe9e4d8, roughness: 0.8 }));
+foot.position.y = 11; foot.castShadow = true; foot.receiveShadow = true;
+tower.add(foot);
+const footGlass = new THREE.Mesh(new THREE.BoxGeometry(71, 6, 71), matGlass);
+footGlass.position.y = 16; tower.add(footGlass);
+
+// Main Deck (150 m) – two floors, octagonal
+function deck(y, radius, height, floors) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius * 0.92, height, 8, 1), matDeck);
+  body.castShadow = true; g.add(body);
+  for (let f = 0; f < floors; f++) {
+    const glass = new THREE.Mesh(new THREE.CylinderGeometry(radius + 0.3, radius + 0.3, height / floors * 0.55, 8, 1, true), matGlass);
+    glass.position.y = -height / 2 + height / floors * (f + 0.5);
+    g.add(glass);
+  }
+  const roof = new THREE.Mesh(new THREE.CylinderGeometry(radius * 0.6, radius, 2.5, 8, 1), matWhite);
+  roof.position.y = height / 2 + 1.2; g.add(roof);
+  g.position.y = y + height / 2;
+  return g;
+}
+tower.add(deck(145, 30, 14, 2));   // Main Deck  145–159 m
+tower.add(deck(247, 12, 8, 1));    // Top Deck   247–255 m
+
+// Upper mast structure + antenna (255 → 333 m)
+const mast = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 4.5, 30, 8), matWhite);
+mast.position.y = 255 + 15; mast.castShadow = true; tower.add(mast);
+const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 1.6, 48, 8), matAnt);
+antenna.position.y = 285 + 24; antenna.castShadow = true; tower.add(antenna);
+// Antenna cross-arms
+for (let i = 0; i < 4; i++) {
+  const y = 292 + i * 9;
+  const arm = new THREE.Mesh(new THREE.BoxGeometry(6, 0.5, 0.5), matAnt);
+  arm.position.y = y; arm.rotation.y = i * Math.PI / 4; tower.add(arm);
+}
+// Aircraft warning light at the very top (333 m)
+const beaconMat = new THREE.MeshBasicMaterial({ color: 0xff2020 });
+const beacon = new THREE.Mesh(new THREE.SphereGeometry(1.2, 12, 12), beaconMat);
+beacon.position.y = 333; tower.add(beacon);
+
+// ---------- Tower illumination (night "Landmark Light") ----------
+const towerLights = new THREE.Group();
+towerLights.visible = false;
+scene.add(towerLights);
+for (let h = 10; h < 250; h += 12) {
+  const w = halfWidth(h);
+  for (let c = 0; c < 4; c++) {
+    const l = new THREE.Mesh(new THREE.SphereGeometry(0.9, 6, 6), new THREE.MeshBasicMaterial({ color: 0xffb060 }));
+    l.position.set(corners[c][0] * w, h, corners[c][1] * w);
+    towerLights.add(l);
+  }
+}
+const glowLight = new THREE.PointLight(0xffa040, 0, 400, 1.2);
+glowLight.position.set(0, 120, 0);
+scene.add(glowLight);
+
+// ---------- City blocks around the tower ----------
+const city = new THREE.Group();
+scene.add(city);
+const bldgMats = [0xa9adb5, 0x8f96a3, 0xc9c2b4, 0x6f7887, 0xb8b0a0, 0x9aa3ad].map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.85, metalness: 0.05 }));
+const rng = mulberry32(20240913);
+const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+for (let gx = -4; gx <= 4; gx++) for (let gz = -4; gz <= 4; gz++) {
+  const cx = gx * 420, cz = gz * 420;
+  if (Math.hypot(cx, cz) < 260) continue; // keep the park clear
+  const count = 4 + Math.floor(rng() * 5);
+  for (let i = 0; i < count; i++) {
+    const w = 25 + rng() * 55, d = 25 + rng() * 55;
+    const dist = Math.hypot(cx, cz);
+    const hMax = dist < 700 ? 80 : dist < 1200 ? 150 : 110;
+    const h = 12 + rng() * hMax;
+    const b = new THREE.Mesh(boxGeo, bldgMats[Math.floor(rng() * bldgMats.length)]);
+    b.scale.set(w, h, d);
+    b.position.set(cx + (rng() - 0.5) * 320, h / 2, cz + (rng() - 0.5) * 320);
+    b.castShadow = dist < 900; b.receiveShadow = true;
+    city.add(b);
+  }
+}
+// Trees in the park
+const treeGeo = new THREE.ConeGeometry(4, 12, 7);
+const treeMat = new THREE.MeshStandardMaterial({ color: 0x3f7a3a, roughness: 1 });
+const trunkGeo = new THREE.CylinderGeometry(0.6, 0.8, 4, 6);
+const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5b3f2a });
+for (let i = 0; i < 90; i++) {
+  const ang = rng() * Math.PI * 2, r = 60 + rng() * 85;
+  const x = Math.cos(ang) * r, z = Math.sin(ang) * r;
+  const t = new THREE.Mesh(treeGeo, treeMat); t.position.set(x, 10, z); t.castShadow = true;
+  const tr = new THREE.Mesh(trunkGeo, trunkMat); tr.position.set(x, 2, z);
+  scene.add(t, tr);
+}
+
+// Night window lights on buildings (instanced points)
+const windowPts = [];
+city.children.forEach(b => {
+  const { x: w, y: h, z: d } = b.scale;
+  for (let y = 4; y < h - 2; y += 5) for (let k = 0; k < 6; k++) {
+    if (rng() > 0.35) continue;
+    const side = Math.floor(rng() * 4);
+    const u = (rng() - 0.5) * (side < 2 ? w : d);
+    const px = side === 0 ? w / 2 + 0.2 : side === 1 ? -w / 2 - 0.2 : u;
+    const pz = side === 2 ? d / 2 + 0.2 : side === 3 ? -d / 2 - 0.2 : u;
+    windowPts.push(b.position.x + px, y, b.position.z + pz);
+  }
+});
+const winGeo = new THREE.BufferGeometry();
+winGeo.setAttribute('position', new THREE.Float32BufferAttribute(windowPts, 3));
+const windows = new THREE.Points(winGeo, new THREE.PointsMaterial({ color: 0xffe0a0, size: 3.2, sizeAttenuation: true }));
+windows.visible = false;
+scene.add(windows);
+
+// ---------- Controls ----------
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.target.set(0, 120, 0);
+orbit.enableDamping = true; orbit.dampingFactor = 0.06;
+orbit.maxPolarAngle = Math.PI / 2 - 0.02;
+orbit.minDistance = 30; orbit.maxDistance = 1800;
+orbit.autoRotate = false; orbit.autoRotateSpeed = 0.6;
+
+const walk = new PointerLockControls(camera, document.body);
+let mode = 'orbit';
+const keys = new Set();
+const vel = new THREE.Vector3();
+addEventListener('keydown', e => keys.add(e.code));
+addEventListener('keyup', e => keys.delete(e.code));
+
+const btnOrbit = document.getElementById('btnOrbit');
+const btnWalk  = document.getElementById('btnWalk');
+const btnNight = document.getElementById('btnNight');
+const btnAuto  = document.getElementById('btnAuto');
+
+function setMode(m) {
+  mode = m;
+  btnOrbit.classList.toggle('active', m === 'orbit');
+  btnWalk.classList.toggle('active', m === 'walk');
+  orbit.enabled = m === 'orbit';
+  if (m === 'walk') {
+    camera.position.set(140, 1.7, 140);
+    camera.lookAt(0, 150, 0);
+    walk.lock();
+  } else {
+    if (walk.isLocked) walk.unlock();
+    camera.position.set(420, 190, 420);
+    orbit.target.set(0, 120, 0);
+  }
+}
+btnOrbit.onclick = () => setMode('orbit');
+btnWalk.onclick  = () => setMode('walk');
+walk.addEventListener('unlock', () => { if (mode === 'walk') setMode('orbit'); });
+
+let night = false;
+btnNight.onclick = () => {
+  night = !night;
+  btnNight.classList.toggle('active', night);
+  skyUniforms.topColor.value.set(night ? 0x060a1c : 0x2a6fd6);
+  skyUniforms.bottomColor.value.set(night ? 0x2a2540 : 0xdcecff);
+  scene.fog.color.set(night ? 0x141628 : 0xdcecff);
+  sun.intensity = night ? 0.12 : 2.2;
+    renderer.toneMappingExposure = night ? 0.85 : 1.0;
+  towerLights.visible = night; windows.visible = night;
+  glowLight.intensity = night ? 3.5 : 0;
+  matOrange.emissive.set(night ? 0xff7a30 : 0x000000); matOrange.emissiveIntensity = 0.9;
+  matWhite.emissive.set(night ? 0xffd9a0 : 0x000000);  matWhite.emissiveIntensity = 0.7;
+  matDeck.emissive.set(night ? 0xffe6c0 : 0x000000);   matDeck.emissiveIntensity = 0.5;
+  hemi.intensity = night ? 0.35 : 0.7;
+};
+btnAuto.onclick = () => { orbit.autoRotate = !orbit.autoRotate; btnAuto.classList.toggle('active', orbit.autoRotate); };
+
+// ---------- Loop ----------
+const clock = new THREE.Clock();
+const fpsEl = document.getElementById('fps');
+let frames = 0, fpsT = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  if (mode === 'orbit') {
+    orbit.update();
+  } else {
+    const speed = keys.has('ShiftLeft') ? 40 : 14;
+    const f = (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0);
+    const r = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
+    vel.set(r, 0, f).normalize().multiplyScalar(speed * dt);
+    walk.moveRight(vel.x); walk.moveForward(vel.z);
+    camera.position.y = 1.7;
+  }
+
+  beaconMat.color.setHex(Math.floor(clock.elapsedTime * 2) % 2 ? 0xff2020 : 0x550000);
+
+  renderer.render(scene, camera);
+  frames++; fpsT += dt;
+  if (fpsT >= 1) { fpsEl.textContent = `${frames} fps`; frames = 0; fpsT = 0; }
+}
+animate();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+</script>
+</body>
+</html>
